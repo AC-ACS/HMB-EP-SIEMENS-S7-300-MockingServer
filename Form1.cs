@@ -181,16 +181,14 @@ namespace S7_300_MockingServer_UI
                         if (IsReadRequestReset(buffer))
                         {
                             Debug.WriteLine("Write DB180 for ReadRequest RESET identified.");
-                            UpdateValue(27, '0');
                         }
                         else
                         {
-                            Debug.WriteLine("Write DB180 for HeartBit RESET identified.");
-                            //byte[] readResponse = CreateS7ReadResponse();
-                            Thread.Sleep(1000);
-                            //clientSocket.Send(readResponse);
-                            //Debug.WriteLine("Sent DB180 Read Response.");
+                            Debug.WriteLine("Write DB180 for HeartBit or work result identified.");
                         }
+                        ApplyWriteToResponse(buffer);
+                        clientSocket.Send(CreateS7WriteAck(buffer));
+                        Debug.WriteLine("Sent DB180 write acknowledgement.");
                     }
                     else if (IsCPUFunctionRequest(buffer))
                     {
@@ -289,6 +287,54 @@ namespace S7_300_MockingServer_UI
         private static bool IsWriteRequest(byte[] buffer)
         {
             return buffer.Length > 17 && buffer[17] == 0x05;
+        }
+
+        /// <summary>
+        /// Builds the S7 "write var" acknowledgement that Sharp7 (inside the PLC Station Client's
+        /// S7DataAdapter.dll) waits for after every DBWrite: 22 bytes with return code 0xFF at byte 21.
+        /// Without it each heartbeat, read-request reset and work-result write ends in a receive
+        /// timeout (Sharp7 error 5) on the client side.
+        /// </summary>
+        private static byte[] CreateS7WriteAck(byte[] request)
+        {
+            return new byte[]
+            {
+                0x03, 0x00, 0x00, 0x16,      // TPKT, 22 bytes
+                0x02, 0xF0, 0x80,            // COTP data
+                0x32, 0x03, 0x00, 0x00,      // S7 header, ack-data
+                request[11], request[12],    // PDU reference, echoed from the request
+                0x00, 0x02, 0x00, 0x01,      // parameter length 2, data length 1
+                0x00, 0x00,                  // no error
+                0x05, 0x01,                  // write var, one item
+                0xFF                         // item result: success
+            };
+        }
+
+        /// <summary>
+        /// Copies the written bytes into the simulated DB180 so the next read returns them, the way
+        /// a real PLC would: the read-request reset at DBB2, the heartbeat at DBB0, the work done and
+        /// work result at DBB5 and DBB6. DB byte 0 sits at index 25 of the read response.
+        /// </summary>
+        private static void ApplyWriteToResponse(byte[] buffer)
+        {
+            const int firstDataIndexInResponse = 25;
+            int startByte = ((buffer[28] << 16) | (buffer[29] << 8) | buffer[30]) >> 3;
+            int transportSize = buffer[32];
+            int length = (buffer[33] << 8) | buffer[34];
+            if (transportSize == 0x04)
+            {
+                length /= 8; // length given in bits for BYTE/WORD transport
+            }
+            for (int index = 0; index < length && 35 + index < buffer.Length; index++)
+            {
+                int target = firstDataIndexInResponse + startByte + index;
+                if (target >= response.Length)
+                {
+                    Debug.WriteLine($"Write beyond the simulated DB ignored, DB byte {startByte + index}.");
+                    break;
+                }
+                response[target] = buffer[35 + index];
+            }
         }
 
         private static bool IsReadRequestReset(byte[] buffer)
